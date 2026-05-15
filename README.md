@@ -6,7 +6,7 @@ The app lets you upload a labeling JSON file and matching channel `.wav` files, 
 
 ## Features
 
-- Upload a labeling JSON file and multiple `.wav` / `.wave` channel audio files.
+- Upload a labeling JSON file and multiple `.wav` / `.wave` channel audio files, or load channel WAV files from a Google Drive folder link.
 - Match audio files to speakers using participant email or username in the WAV filename.
 - Sticky waveform/audio player with play, pause, seek, skip, and speed controls.
 - Highlight the current word while audio plays.
@@ -42,12 +42,20 @@ Timestamps are stored in milliseconds.
 
 ### Audio
 
-Upload one WAV file per speaker/channel. The filename should contain the participant email or username, for example:
+Upload one WAV file per speaker/channel, or provide a Google Drive folder containing the WAV files. The filename should contain the participant email or username, for example:
 
 ```text
 paul.g1@turing.com.wav
 paul.g1.wav
 ```
+
+When using a Google Drive folder link, the app loads files whose names end with:
+
+```text
+@turing.com.wav
+```
+
+The Drive folder must be accessible to the deployed app, such as a public/shared folder.
 
 ## Local Setup
 
@@ -79,7 +87,9 @@ http://localhost:8501
 ## How To Use
 
 1. Upload the labeling JSON in the sidebar.
-2. Upload the matching WAV files in the sidebar.
+2. Choose an audio source:
+   - upload the matching WAV files, or
+   - paste a Google Drive folder link containing `@turing.com.wav` files.
 3. Select a speaker/channel.
 4. Use the waveform player to listen.
 5. Click any transcript word to edit text or timing.

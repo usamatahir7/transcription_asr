@@ -1,7 +1,9 @@
 import base64
 import json
 import math
+import os
 import re
+import tempfile
 import wave
 from io import BytesIO
 from pathlib import Path
@@ -37,14 +39,117 @@ def parse_uploaded_json(uploaded_file) -> dict:
     return data
 
 
-def parse_uploaded_audio_files(uploaded_files) -> dict[str, bytes]:
+def update_progress(progress, value: int, text: str) -> None:
+    if progress is not None:
+        progress.progress(value, text=text)
+
+
+def parse_uploaded_audio_files(uploaded_files, progress=None) -> dict[str, bytes]:
     audio_files = {}
-    for uploaded_file in uploaded_files:
+    valid_files = [
+        uploaded_file
+        for uploaded_file in uploaded_files
+        if Path(uploaded_file.name).suffix.lower() in AUDIO_EXTENSIONS
+    ]
+    total_files = max(1, len(valid_files))
+    update_progress(progress, 5, "Preparing uploaded audio files...")
+    for index, uploaded_file in enumerate(valid_files, start=1):
         filename = Path(uploaded_file.name).name
-        if Path(filename).suffix.lower() not in AUDIO_EXTENSIONS:
-            continue
         audio_files[filename] = bytes(uploaded_file.getbuffer())
+        percent = 5 + int(index / total_files * 90)
+        update_progress(progress, percent, f"Loaded {index}/{len(valid_files)} WAV files...")
+    update_progress(progress, 100, "Audio files ready.")
     return audio_files
+
+
+def is_drive_folder_link(link: str) -> bool:
+    return "/folders/" in link or "folders/" in link
+
+
+def extract_drive_id(link: str) -> str | None:
+    patterns = [
+        r"/d/([a-zA-Z0-9_-]+)",
+        r"id=([a-zA-Z0-9_-]+)",
+        r"/folders/([a-zA-Z0-9_-]+)",
+    ]
+    for pattern in patterns:
+        match = re.search(pattern, link)
+        if match:
+            return match.group(1)
+    if re.fullmatch(r"[a-zA-Z0-9_-]{20,}", link.strip()):
+        return link.strip()
+    return None
+
+
+def is_turing_wav(path: Path) -> bool:
+    return path.is_file() and path.name.lower().endswith("@turing.com.wav")
+
+
+@st.cache_data(show_spinner=False)
+def fetch_turing_wavs_from_drive(drive_link: str, _progress=None) -> dict[str, bytes]:
+    drive_link = drive_link.strip()
+    if not drive_link:
+        return {}
+
+    try:
+        import gdown
+    except ImportError as exc:
+        raise RuntimeError(
+            "Google Drive folder loading requires the `gdown` package. "
+            "Install dependencies with `pip install -r requirements.txt`."
+        ) from exc
+
+    with tempfile.TemporaryDirectory() as temp_dir:
+        try:
+            update_progress(_progress, 5, "Connecting to Google Drive...")
+            if is_drive_folder_link(drive_link):
+                update_progress(_progress, 15, "Downloading Google Drive folder...")
+                gdown.download_folder(
+                    drive_link,
+                    output=temp_dir,
+                    quiet=True,
+                    use_cookies=False,
+                )
+            else:
+                file_id = extract_drive_id(drive_link)
+                if not file_id:
+                    raise ValueError("Invalid Google Drive link.")
+                update_progress(_progress, 15, "Downloading Google Drive file...")
+                gdown.download(
+                    id=file_id,
+                    output=temp_dir,
+                    quiet=True,
+                    fuzzy=True,
+                )
+        except Exception as exc:
+            raise RuntimeError(
+                "Could not download from Google Drive. This is often caused "
+                "by a private/non-shared folder, Google Drive quota/confirmation "
+                "limits, or a network/DNS issue reaching googleusercontent.com. "
+                "Try making the folder public/shared, retrying later, or using the "
+                "manual WAV upload option."
+            ) from exc
+
+        update_progress(_progress, 75, "Scanning downloaded files...")
+        matched_paths = []
+        for root, _dirs, files in os.walk(temp_dir):
+            for filename in files:
+                path = Path(root) / filename
+                if is_turing_wav(path):
+                    matched_paths.append(path)
+
+        audio_files = {}
+        total_files = max(1, len(matched_paths))
+        for index, path in enumerate(matched_paths, start=1):
+            audio_files[path.name] = path.read_bytes()
+            percent = 75 + int(index / total_files * 25)
+            update_progress(
+                _progress,
+                percent,
+                f"Loaded {index}/{len(matched_paths)} matching WAV files...",
+            )
+        update_progress(_progress, 100, "Google Drive audio files ready.")
+        return audio_files
 
 
 def json_download_bytes(data: dict) -> bytes:
@@ -278,25 +383,57 @@ def main() -> None:
             type=["json"],
             accept_multiple_files=False,
         )
-        uploaded_audio_files = st.file_uploader(
-            "Channel WAV files",
-            type=["wav", "wave"],
-            accept_multiple_files=True,
+        audio_source = st.radio(
+            "Audio source",
+            ["Upload WAV files", "Google Drive folder"],
+        )
+        uploaded_audio_files = []
+        drive_folder_link = ""
+        if audio_source == "Upload WAV files":
+            uploaded_audio_files = st.file_uploader(
+                "Channel WAV files",
+                type=["wav", "wave"],
+                accept_multiple_files=True,
+            )
+        else:
+            drive_folder_link = st.text_input(
+                "Google Drive folder link",
+                placeholder="https://drive.google.com/drive/folders/...",
+            )
+            st.caption("Loads WAV files whose names end with `@turing.com.wav`.")
+        st.caption(
+            "Note: Streamlit shows browser upload progress while files upload. "
+            "The progress below starts once the app begins processing files."
         )
 
         upload_signature = (
             uploaded_file_signature(uploaded_json),
-            uploaded_files_signature(uploaded_audio_files),
+            audio_source,
+            uploaded_files_signature(uploaded_audio_files)
+            if audio_source == "Upload WAV files"
+            else drive_folder_link.strip(),
         )
-        if uploaded_json is not None and upload_signature != st.session_state.get(
-            "loaded_upload_signature"
+        if (
+            uploaded_json is not None
+            and audio_source == "Upload WAV files"
+            and upload_signature != st.session_state.get("loaded_upload_signature")
         ):
             try:
                 st.session_state.data = parse_uploaded_json(uploaded_json)
                 st.session_state.json_name = uploaded_json.name
-                st.session_state.audio_files = parse_uploaded_audio_files(
-                    uploaded_audio_files or []
-                )
+                if audio_source == "Upload WAV files":
+                    progress = st.progress(0, text="Processing uploaded WAV files...")
+                    st.session_state.audio_files = parse_uploaded_audio_files(
+                        uploaded_audio_files or [],
+                        progress=progress,
+                    )
+                else:
+                    with st.spinner("Fetching WAV files from Google Drive..."):
+                        progress = st.progress(0, text="Starting Google Drive fetch...")
+                        st.session_state.audio_files = fetch_turing_wavs_from_drive(
+                            drive_folder_link,
+                            _progress=progress,
+                        )
                 st.session_state.active_participant_id = None
                 st.session_state.edited_json_bytes = None
                 st.session_state.last_component_event_id = None
@@ -307,19 +444,31 @@ def main() -> None:
                 st.session_state.loaded_upload_signature = upload_signature
                 st.session_state.data_version += 1
                 st.rerun()
-            except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                st.error(f"Could not load JSON: {exc}")
+            except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
+                st.error(f"Could not load files: {exc}")
 
         if st.button("Load uploaded files", type="primary"):
             if uploaded_json is None:
                 st.error("Please upload a JSON file.")
+            elif audio_source == "Google Drive folder" and not drive_folder_link.strip():
+                st.error("Please enter a Google Drive folder link.")
             else:
                 try:
                     st.session_state.data = parse_uploaded_json(uploaded_json)
                     st.session_state.json_name = uploaded_json.name
-                    st.session_state.audio_files = parse_uploaded_audio_files(
-                        uploaded_audio_files or []
-                    )
+                    if audio_source == "Upload WAV files":
+                        progress = st.progress(0, text="Processing uploaded WAV files...")
+                        st.session_state.audio_files = parse_uploaded_audio_files(
+                            uploaded_audio_files or [],
+                            progress=progress,
+                        )
+                    else:
+                        with st.spinner("Fetching WAV files from Google Drive..."):
+                            progress = st.progress(0, text="Starting Google Drive fetch...")
+                            st.session_state.audio_files = fetch_turing_wavs_from_drive(
+                                drive_folder_link,
+                                _progress=progress,
+                            )
                     st.session_state.active_participant_id = None
                     st.session_state.edited_json_bytes = None
                     st.session_state.last_component_event_id = None
@@ -331,8 +480,8 @@ def main() -> None:
                     st.session_state.data_version += 1
                     st.success("Uploaded files loaded.")
                     st.rerun()
-                except (json.JSONDecodeError, UnicodeDecodeError, ValueError) as exc:
-                    st.error(f"Could not load JSON: {exc}")
+                except (json.JSONDecodeError, UnicodeDecodeError, ValueError, RuntimeError) as exc:
+                    st.error(f"Could not load files: {exc}")
 
         data = st.session_state.data
         if data is None:
