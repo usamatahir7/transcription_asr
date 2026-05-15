@@ -85,7 +85,6 @@ def is_turing_wav(path: Path) -> bool:
     return path.is_file() and path.name.lower().endswith("@turing.com.wav")
 
 
-@st.cache_data(show_spinner=False)
 def fetch_turing_wavs_from_drive(drive_link: str, _progress=None) -> dict[str, bytes]:
     drive_link = drive_link.strip()
     if not drive_link:
