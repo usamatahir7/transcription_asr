@@ -1,0 +1,251 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .audio-panel {
+        padding: 0.65rem 0.75rem;
+        border-radius: 0.75rem;
+        background: #f8fafc;
+        border: 1px solid #e2e8f0;
+        box-shadow: 0 8px 24px rgba(15, 23, 42, 0.10);
+      }
+
+      .audio-title {
+        font-weight: 800;
+        margin-bottom: 0.45rem;
+        color: #0f172a;
+      }
+
+      .waveform {
+        width: 100%;
+        height: 64px;
+        border-radius: 0.75rem;
+        background: #0f172a;
+        cursor: pointer;
+      }
+
+      .audio-controls {
+        display: flex;
+        gap: 0.5rem;
+        align-items: center;
+        flex-wrap: wrap;
+        margin-top: 0.5rem;
+      }
+
+      .audio-controls button,
+      .audio-controls select {
+        border: 1px solid #cbd5e1;
+        border-radius: 0.45rem;
+        padding: 0.35rem 0.55rem;
+        background: white;
+      }
+
+      .audio-clock {
+        font-weight: 700;
+        color: #334155;
+      }
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script>
+      const root = document.getElementById("root");
+      let audio = null;
+      let canvas = null;
+      let ctx = null;
+      let clock = null;
+      let playPause = null;
+      let peaks = [];
+      let channel = null;
+
+      function streamlitMessage(type, data = {}) {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type,
+            ...data,
+          },
+          "*",
+        );
+      }
+
+      function setFrameHeight() {
+        streamlitMessage("streamlit:setFrameHeight", {
+          height: Math.max(150, document.documentElement.scrollHeight),
+        });
+      }
+
+      function makeFrameSticky() {
+        if (!window.frameElement) return;
+        window.frameElement.style.position = "sticky";
+        window.frameElement.style.top = "0";
+        window.frameElement.style.zIndex = "999";
+        window.frameElement.style.background = "white";
+      }
+
+      function escapeText(value) {
+        const span = document.createElement("span");
+        span.textContent = value ?? "";
+        return span.innerHTML;
+      }
+
+      function formatMs(milliseconds) {
+        const totalSeconds = Math.max(0, Number(milliseconds || 0) / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds - minutes * 60;
+        return `${String(minutes).padStart(2, "0")}:${seconds.toFixed(3).padStart(6, "0")}`;
+      }
+
+      function formatSeconds(seconds) {
+        return formatMs((seconds || 0) * 1000);
+      }
+
+      function drawWaveform() {
+        if (!canvas || !ctx) return;
+        const width = canvas.width;
+        const height = canvas.height;
+        const mid = height / 2;
+        ctx.clearRect(0, 0, width, height);
+        ctx.fillStyle = "#0f172a";
+        ctx.fillRect(0, 0, width, height);
+
+        const barWidth = Math.max(1, width / Math.max(1, peaks.length));
+        for (let i = 0; i < peaks.length; i++) {
+          const peak = Math.min(1, Math.pow(peaks[i] || 0, 0.55) * 1.75);
+          const barHeight = Math.max(3, peak * (height - 10));
+          const x = i * barWidth;
+          ctx.fillStyle = "#38bdf8";
+          ctx.fillRect(x, mid - barHeight / 2, Math.max(1, barWidth - 1), barHeight);
+        }
+
+        const progress = audio && audio.duration ? audio.currentTime / audio.duration : 0;
+        ctx.fillStyle = "rgba(248, 250, 252, 0.22)";
+        ctx.fillRect(0, 0, width * progress, height);
+        ctx.strokeStyle = "#f97316";
+        ctx.lineWidth = 3;
+        ctx.beginPath();
+        ctx.moveTo(width * progress, 0);
+        ctx.lineTo(width * progress, height);
+        ctx.stroke();
+      }
+
+      function broadcastTime() {
+        if (!audio || !channel) return;
+        channel.postMessage({
+          type: "time",
+          currentTime: audio.currentTime,
+        });
+        if (clock) {
+          clock.textContent = `${formatSeconds(audio.currentTime)} / ${formatSeconds(audio.duration)}`;
+        }
+        drawWaveform();
+      }
+
+      function render(args) {
+        root.innerHTML = "";
+        peaks = args.peaks || [];
+
+        if (channel) channel.close();
+        channel = args.channelName && "BroadcastChannel" in window
+          ? new BroadcastChannel(args.channelName)
+          : null;
+        if (channel) {
+          channel.onmessage = (event) => {
+            if (event.data?.type === "seek" && audio) {
+              audio.currentTime = Math.max(0, Number(event.data.currentTime || 0));
+              broadcastTime();
+            }
+          };
+        }
+
+        const panel = document.createElement("div");
+        panel.className = "audio-panel";
+        panel.innerHTML = `
+          <div class="audio-title">${escapeText(args.audioTitle || "Audio")}</div>
+          <canvas class="waveform" width="1200" height="64"></canvas>
+          <div class="audio-controls">
+            <button type="button" data-audio-action="play">Play</button>
+            <button type="button" data-skip="-5">-5s</button>
+            <button type="button" data-skip="5">+5s</button>
+            <label>Speed
+              <select data-speed>
+                <option value="0.5">0.5x</option>
+                <option value="0.75">0.75x</option>
+                <option value="1" selected>1x</option>
+                <option value="1.25">1.25x</option>
+                <option value="1.5">1.5x</option>
+                <option value="2">2x</option>
+              </select>
+            </label>
+            <span class="audio-clock">00:00.000 / 00:00.000</span>
+          </div>
+          <audio preload="auto" src="data:audio/wav;base64,${args.audioBase64 || ""}" controls style="width: 100%; margin-top: 0.55rem;"></audio>
+        `;
+        root.appendChild(panel);
+
+        audio = panel.querySelector("audio");
+        canvas = panel.querySelector("canvas");
+        ctx = canvas.getContext("2d");
+        clock = panel.querySelector(".audio-clock");
+        playPause = panel.querySelector('[data-audio-action="play"]');
+        const speed = panel.querySelector("[data-speed]");
+
+        canvas.addEventListener("click", (event) => {
+          if (!audio.duration) return;
+          const rect = canvas.getBoundingClientRect();
+          const ratio = (event.clientX - rect.left) / rect.width;
+          audio.currentTime = Math.max(0, Math.min(audio.duration, ratio * audio.duration));
+          broadcastTime();
+        });
+        playPause.addEventListener("click", async () => {
+          if (audio.paused) {
+            await audio.play();
+          } else {
+            audio.pause();
+          }
+        });
+        panel.querySelectorAll("[data-skip]").forEach((button) => {
+          button.addEventListener("click", () => {
+            audio.currentTime = Math.max(
+              0,
+              Math.min(audio.duration || 0, audio.currentTime + Number(button.dataset.skip)),
+            );
+            broadcastTime();
+          });
+        });
+        speed.addEventListener("change", () => {
+          audio.playbackRate = Number(speed.value);
+        });
+        audio.addEventListener("play", () => {
+          playPause.textContent = "Pause";
+        });
+        audio.addEventListener("pause", () => {
+          playPause.textContent = "Play";
+        });
+        audio.addEventListener("timeupdate", broadcastTime);
+        audio.addEventListener("loadedmetadata", broadcastTime);
+
+        drawWaveform();
+        makeFrameSticky();
+        setFrameHeight();
+      }
+
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (data.type !== "streamlit:render") return;
+        render(data.args || {});
+      });
+
+      streamlitMessage("streamlit:componentReady", { apiVersion: 1 });
+      makeFrameSticky();
+      setFrameHeight();
+    </script>
+  </body>
+</html>

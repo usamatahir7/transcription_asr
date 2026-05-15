@@ -1,0 +1,589 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <style>
+      body {
+        margin: 0;
+        font-family: system-ui, -apple-system, BlinkMacSystemFont, "Segoe UI", sans-serif;
+      }
+
+      .transcript-box {
+        position: relative;
+        min-height: 135px;
+        max-height: 300px;
+        overflow-y: auto;
+        padding: 1rem;
+        border: 1px solid rgba(49, 51, 63, 0.25);
+        border-radius: 0.65rem;
+        background: white;
+        color: #111827;
+        line-height: 1.95;
+        font-size: 1rem;
+      }
+
+      .transcript-word {
+        appearance: none;
+        border: 0;
+        background: transparent;
+        cursor: pointer;
+        font: inherit;
+        color: #0f172a;
+        border-radius: 0.25rem;
+        padding: 0.08rem 0.12rem;
+      }
+
+      .transcript-word:hover {
+        background: #dbeafe;
+        color: #1d4ed8;
+      }
+
+      .transcript-word.bad-timing {
+        background: #fee2e2;
+        color: #991b1b;
+        box-shadow: 0 0 0 1px #ef4444 inset;
+      }
+
+      .transcript-word.bad-timing:hover {
+        background: #fecaca;
+        color: #7f1d1d;
+      }
+
+      .transcript-word.current-word {
+        background: #f97316;
+        color: white;
+        box-shadow: 0 0 0 2px rgba(249, 115, 22, 0.25);
+      }
+
+      .transcript-blank {
+        color: #64748b;
+        font-style: italic;
+      }
+
+      .segment-break {
+        color: #94a3b8;
+        font-size: 0.85rem;
+      }
+
+      .word-popover {
+        display: none;
+        position: absolute;
+        z-index: 100;
+        width: 310px;
+        padding: 0.9rem;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.75rem;
+        background: #ffffff;
+        box-shadow: 0 20px 40px rgba(15, 23, 42, 0.22);
+        line-height: 1.4;
+      }
+
+      .word-popover h4 {
+        margin: 0 0 0.65rem 0;
+        font-size: 0.95rem;
+      }
+
+      .word-popover label {
+        display: block;
+        margin-top: 0.45rem;
+        color: #334155;
+        font-size: 0.78rem;
+        font-weight: 600;
+      }
+
+      .word-popover input,
+      .word-popover select {
+        box-sizing: border-box;
+        width: 100%;
+        margin-top: 0.18rem;
+        padding: 0.35rem 0.45rem;
+        border: 1px solid #cbd5e1;
+        border-radius: 0.4rem;
+      }
+
+      .popover-row {
+        display: grid;
+        grid-template-columns: 1fr 1fr;
+        gap: 0.5rem;
+      }
+
+      .popover-actions {
+        display: flex;
+        gap: 0.4rem;
+        flex-wrap: wrap;
+        margin-top: 0.75rem;
+      }
+
+      .popover-actions button {
+        border: 0;
+        border-radius: 0.45rem;
+        padding: 0.45rem 0.65rem;
+        cursor: pointer;
+        font-weight: 700;
+      }
+
+      .save-button {
+        background: #2563eb;
+        color: white;
+      }
+
+      .add-button {
+        background: #e0f2fe;
+        color: #075985;
+      }
+
+      .delete-button {
+        background: #fee2e2;
+        color: #991b1b;
+      }
+
+      .cancel-button {
+        background: #e2e8f0;
+        color: #334155;
+      }
+
+      .toolbar {
+        display: flex;
+        align-items: center;
+        gap: 0.75rem;
+        margin-bottom: 0.75rem;
+      }
+
+      .save-json-button {
+        border: 0;
+        border-radius: 0.5rem;
+        padding: 0.55rem 0.85rem;
+        background: #16a34a;
+        color: white;
+        cursor: pointer;
+        font-weight: 800;
+      }
+
+      .dirty-status {
+        color: #92400e;
+        font-size: 0.9rem;
+        font-weight: 700;
+      }
+
+    </style>
+  </head>
+  <body>
+    <div id="root"></div>
+
+    <script>
+      const root = document.getElementById("root");
+      let selected = null;
+      let fields = null;
+      let currentSegments = [];
+      let dirty = false;
+      let dirtyStatus = null;
+      let wordButtons = [];
+      let currentWordButton = null;
+      let channel = null;
+
+      function streamlitMessage(type, data = {}) {
+        window.parent.postMessage(
+          {
+            isStreamlitMessage: true,
+            type,
+            ...data,
+          },
+          "*",
+        );
+      }
+
+      function setFrameHeight() {
+        streamlitMessage("streamlit:setFrameHeight", {
+          height: Math.max(640, document.documentElement.scrollHeight),
+        });
+      }
+
+      function setComponentValue(value) {
+        streamlitMessage("streamlit:setComponentValue", { value });
+      }
+
+      function escapeText(value) {
+        const span = document.createElement("span");
+        span.textContent = value ?? "";
+        return span.innerHTML;
+      }
+
+      function formatMs(milliseconds) {
+        if (milliseconds === null || milliseconds === undefined) return "--:--.---";
+        const totalSeconds = Math.max(0, Number(milliseconds) / 1000);
+        const minutes = Math.floor(totalSeconds / 60);
+        const seconds = totalSeconds - minutes * 60;
+        return `${String(minutes).padStart(2, "0")}:${seconds.toFixed(3).padStart(6, "0")}`;
+      }
+
+      function timeInputToMs(value) {
+        const text = String(value || "").trim();
+        const match = text.match(/^(\d+):([0-5]?\d(?:\.\d+)?)$/);
+        if (!match) return Number.NaN;
+        const minutes = Number(match[1]);
+        const seconds = Number(match[2]);
+        return Math.round((minutes * 60 + seconds) * 1000);
+      }
+
+      function eventId() {
+        return `${Date.now()}-${Math.random().toString(16).slice(2)}`;
+      }
+
+      function cloneSegments(segments) {
+        return JSON.parse(JSON.stringify(segments || []));
+      }
+
+      function setDirty(value, notify = true) {
+        dirty = value;
+        if (dirtyStatus) {
+          dirtyStatus.textContent = dirty
+            ? "Unsaved frontend edits"
+            : "No unsaved frontend edits";
+          dirtyStatus.style.color = dirty ? "#92400e" : "#166534";
+        }
+        if (notify) {
+          setComponentValue({
+            eventId: eventId(),
+            action: "unsaved_state",
+            dirty,
+          });
+        }
+      }
+
+      function rebuildButtonFromWord(button, word) {
+        button.dataset.text = word.text || "";
+        button.dataset.start = String(word.start || 0);
+        button.dataset.end = String(word.end || 0);
+        button.dataset.confidence = String(word.confidence ?? 1);
+        button.dataset.userAdded = word.isUserAdded ? "1" : "0";
+        button.title = `${formatMs(word.start)} - ${formatMs(word.end)}`;
+        if ((word.text || "").trim()) {
+          button.textContent = word.text;
+        } else {
+          button.innerHTML = '<span class="transcript-blank">[blank]</span>';
+        }
+      }
+
+      function validateTimings() {
+        currentSegments.forEach((segment, segmentIndex) => {
+          const words = segment.words || [];
+          words.forEach((word, wordIndex) => {
+            const currentButton = wordButtons.find(
+              (button) =>
+                Number(button.dataset.segmentIndex) === segmentIndex &&
+                Number(button.dataset.wordIndex) === wordIndex,
+            );
+            if (!currentButton) return;
+
+            const previousWord = words[wordIndex - 1] || null;
+            const nextWord = words[wordIndex + 1] || null;
+            const start = Number(word.start || 0);
+            const end = Number(word.end || 0);
+            const startsBeforePreviousEnds =
+              previousWord && start < Number(previousWord.end || 0);
+            const endsAfterNextStarts =
+              nextWord && end > Number(nextWord.start || 0);
+            const invertedSelf = end < start;
+            const hasBadTiming =
+              startsBeforePreviousEnds || endsAfterNextStarts || invertedSelf;
+
+            currentButton.classList.toggle("bad-timing", Boolean(hasBadTiming));
+            if (hasBadTiming) {
+              const reasons = [];
+              if (invertedSelf) reasons.push("end is before start");
+              if (startsBeforePreviousEnds) reasons.push("start overlaps previous word");
+              if (endsAfterNextStarts) reasons.push("end overlaps next word");
+              currentButton.title = `${currentButton.title} | ${reasons.join(", ")}`;
+            }
+          });
+        });
+      }
+
+      function highlightCurrentMs(currentMs) {
+        let nextButton = null;
+
+        for (const button of wordButtons) {
+          const start = Number(button.dataset.start || 0);
+          const end = Number(button.dataset.end || 0);
+          if (currentMs >= start && currentMs <= end) {
+            nextButton = button;
+            break;
+          }
+        }
+
+        if (currentWordButton !== nextButton) {
+          if (currentWordButton) currentWordButton.classList.remove("current-word");
+          currentWordButton = nextButton;
+          if (currentWordButton) {
+            currentWordButton.classList.add("current-word");
+            currentWordButton.scrollIntoView({ block: "nearest", inline: "nearest" });
+          }
+        }
+      }
+
+      function seekToWord(button) {
+        const startMs = Number(button.dataset.start || 0);
+        if (channel) {
+          channel.postMessage({
+            type: "seek",
+            currentTime: Math.max(0, startMs / 1000),
+          });
+        }
+        highlightCurrentMs(startMs);
+      }
+
+      function sendAction(action) {
+        if (!selected) return;
+
+        const segmentIndex = Number(selected.segmentIndex);
+        const wordIndex = Number(selected.wordIndex);
+        const words = currentSegments[segmentIndex]?.words || [];
+        const word = words[wordIndex];
+        if (!word) return;
+
+        if (action === "update") {
+          const nextStart = timeInputToMs(fields.start.value);
+          const nextEnd = timeInputToMs(fields.end.value);
+          if (!fields.text.value.trim() || nextEnd < nextStart) return;
+          word.text = fields.text.value.trim();
+          word.start = nextStart;
+          word.end = nextEnd;
+          rebuildButtonFromWord(selected.button, word);
+          validateTimings();
+          setDirty(true);
+          return;
+        }
+
+        if (action === "add") {
+          const text = fields.newText.value.trim();
+          if (!text) return;
+          const insertAt = fields.where.value === "Before selected word" ? wordIndex : wordIndex + 1;
+          const previousWord = words[insertAt - 1] || null;
+          const nextWord = words[insertAt] || null;
+          let start = 0;
+          let end = 300;
+          if (previousWord && nextWord) {
+            start = Number(previousWord.end ?? previousWord.start ?? 0);
+            end = Number(nextWord.start ?? start + 300);
+            if (end <= start) end = start + 300;
+          } else if (previousWord) {
+            start = Number(previousWord.end ?? previousWord.start ?? 0);
+            end = start + 300;
+          } else if (nextWord) {
+            end = Number(nextWord.start ?? nextWord.end ?? 300);
+            start = Math.max(0, end - 300);
+          }
+          words.splice(insertAt, 0, {
+            text,
+            start,
+            end,
+            confidence: 1,
+            isUserAdded: true,
+          });
+          setDirty(true);
+          drawTranscript();
+          return;
+        }
+
+        if (action === "delete") {
+          words.splice(wordIndex, 1);
+          setDirty(true);
+          drawTranscript();
+        }
+      }
+
+      function showPopover(button, popover, box) {
+        seekToWord(button);
+        selected = {
+          segmentIndex: button.dataset.segmentIndex,
+          wordIndex: button.dataset.wordIndex,
+          button,
+        };
+
+        fields.text.value = button.dataset.text || "";
+        fields.start.value = formatMs(Number(button.dataset.start || 0));
+        fields.end.value = formatMs(Number(button.dataset.end || 0));
+          fields.newText.value = "new word";
+        fields.where.value = "After selected word";
+
+        popover.style.display = "block";
+        const boxRect = box.getBoundingClientRect();
+        const buttonRect = button.getBoundingClientRect();
+        const gap = 14;
+        const left = Math.min(
+          box.clientWidth - popover.offsetWidth - 12,
+          Math.max(8, buttonRect.left - boxRect.left),
+        );
+        const belowTop = box.scrollTop + buttonRect.bottom - boxRect.top + gap;
+        const aboveTop = box.scrollTop + buttonRect.top - boxRect.top - popover.offsetHeight - gap;
+        const maxTop = box.scrollTop + box.clientHeight - popover.offsetHeight - 12;
+        const hasRoomBelow = belowTop + popover.offsetHeight <= box.scrollTop + box.clientHeight - 12;
+        const hasRoomAbove = aboveTop >= box.scrollTop + 8;
+        let top = belowTop;
+        if (!hasRoomBelow && hasRoomAbove) {
+          top = aboveTop;
+        } else if (!hasRoomBelow) {
+          top = maxTop;
+        }
+        popover.style.left = `${Math.max(8, left)}px`;
+        popover.style.top = `${Math.max(8, top)}px`;
+        fields.text.focus();
+        setFrameHeight();
+        validateTimings();
+      }
+
+      function saveAll() {
+        setComponentValue({
+          eventId: eventId(),
+          action: "save_all",
+          segments: currentSegments,
+        });
+      }
+
+      function drawTranscript() {
+        root.innerHTML = "";
+        wordButtons = [];
+        currentWordButton = null;
+
+        const toolbar = document.createElement("div");
+        toolbar.className = "toolbar";
+        const saveButton = document.createElement("button");
+        saveButton.type = "button";
+        saveButton.className = "save-json-button";
+        saveButton.textContent = "Save edited JSON";
+        saveButton.addEventListener("click", saveAll);
+        dirtyStatus = document.createElement("span");
+        dirtyStatus.className = "dirty-status";
+        toolbar.appendChild(saveButton);
+        toolbar.appendChild(dirtyStatus);
+        root.appendChild(toolbar);
+
+        const box = document.createElement("div");
+        box.className = "transcript-box";
+
+        currentSegments.forEach((segment, segmentIndex) => {
+          if (segmentIndex > 0) {
+            box.insertAdjacentHTML(
+              "beforeend",
+              `<br><span class="segment-break">Segment ${segmentIndex + 1}</span><br>`,
+            );
+          }
+
+          (segment.words || []).forEach((word, wordIndex) => {
+            const button = document.createElement("button");
+            button.type = "button";
+            button.className = "transcript-word";
+            button.dataset.segmentIndex = String(segmentIndex);
+            button.dataset.wordIndex = String(wordIndex);
+            button.dataset.text = word.text || "";
+            button.dataset.start = String(word.start || 0);
+            button.dataset.end = String(word.end || 0);
+            button.dataset.confidence = String(word.confidence ?? 1);
+            button.dataset.userAdded = word.isUserAdded ? "1" : "0";
+            button.title = `${formatMs(word.start)} - ${formatMs(word.end)}`;
+
+            if ((word.text || "").trim()) {
+              button.textContent = word.text;
+            } else {
+              button.innerHTML = '<span class="transcript-blank">[blank]</span>';
+            }
+            box.appendChild(button);
+            box.appendChild(document.createTextNode(" "));
+            wordButtons.push(button);
+          });
+        });
+
+        const popover = document.createElement("div");
+        popover.className = "word-popover";
+        popover.innerHTML = `
+          <h4>Edit word</h4>
+          <label>Word / token<input data-field="text" type="text"></label>
+          <div class="popover-row">
+            <label>Start (mm:ss.sss)<input data-field="start" type="text" placeholder="01:23.450"></label>
+            <label>End (mm:ss.sss)<input data-field="end" type="text" placeholder="01:24.100"></label>
+          </div>
+          <div class="popover-row">
+            <label>New word<input data-field="newText" type="text" value="new word"></label>
+            <label>Position
+              <select data-field="where">
+                <option>After selected word</option>
+                <option>Before selected word</option>
+              </select>
+            </label>
+          </div>
+          <div class="popover-actions">
+            <button type="button" class="save-button" data-action="update">Save</button>
+            <button type="button" class="add-button" data-action="add">Add</button>
+            <button type="button" class="delete-button" data-action="delete">Delete</button>
+            <button type="button" class="cancel-button" data-action="cancel">Close</button>
+          </div>
+        `;
+        box.appendChild(popover);
+        root.appendChild(box);
+        setDirty(dirty, false);
+
+        fields = {
+          text: popover.querySelector('[data-field="text"]'),
+          start: popover.querySelector('[data-field="start"]'),
+          end: popover.querySelector('[data-field="end"]'),
+          newText: popover.querySelector('[data-field="newText"]'),
+          where: popover.querySelector('[data-field="where"]'),
+        };
+
+        box.querySelectorAll(".transcript-word").forEach((button) => {
+          button.addEventListener("click", (event) => {
+            event.preventDefault();
+            showPopover(button, popover, box);
+          });
+        });
+
+        popover.querySelectorAll("[data-action]").forEach((button) => {
+          button.addEventListener("click", () => {
+            const action = button.dataset.action;
+            if (action === "cancel") {
+              popover.style.display = "none";
+              return;
+            }
+            sendAction(action);
+          });
+        });
+
+        document.addEventListener("click", (event) => {
+          const clickedWord = event.target.closest(".transcript-word");
+          const clickedPopover = popover.contains(event.target);
+          if (!clickedWord && !clickedPopover) {
+            popover.style.display = "none";
+          }
+        });
+
+        setFrameHeight();
+      }
+
+      function render(args) {
+        currentSegments = cloneSegments(args.segments || []);
+        if (channel) channel.close();
+        channel = args.channelName && "BroadcastChannel" in window
+          ? new BroadcastChannel(args.channelName)
+          : null;
+        if (channel) {
+          channel.onmessage = (event) => {
+            if (event.data?.type === "time") {
+              highlightCurrentMs(Number(event.data.currentTime || 0) * 1000);
+            }
+          };
+        }
+        dirty = false;
+        drawTranscript();
+      }
+
+      window.addEventListener("message", (event) => {
+        const data = event.data;
+        if (data.type !== "streamlit:render") return;
+        render(data.args || {});
+      });
+
+      streamlitMessage("streamlit:componentReady", { apiVersion: 1 });
+      setFrameHeight();
+    </script>
+  </body>
+</html>
